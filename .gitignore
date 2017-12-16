@@ -1,0 +1,13 @@
+/translations.pot
+**/.DS_Store
+.DS_Store
+target
+**/target/
+.idea
+*.iml
+*.log
+**/*.log
+**/*.iml
+integtests/translations.pot
+webapp/logs/sql.log.1
+webapp/src/main/resources/data/rotabuilder/solved/

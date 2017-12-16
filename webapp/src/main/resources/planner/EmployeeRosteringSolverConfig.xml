@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<solver>
+  <!--<environmentMode>FAST_ASSERT</environmentMode>-->
+  <solutionClass>com.rotabuilder.dom.domain.solver.EmployeeRoster</solutionClass>
+  <entityClass>com.rotabuilder.dom.domain.shift.ShiftAssignment</entityClass>
+
+  <scoreDirectorFactory>
+    <scoreDefinitionType>HARD_SOFT</scoreDefinitionType>
+    <scoreDrl>planner/EmployeeRosteringScoreRules.drl</scoreDrl>
+  </scoreDirectorFactory>
+
+  <termination>
+    <!--
+      Official benchmark secondsSpentLimit allowed on:
+      - ge0ffrey's main pc: sprint 11, medium 700, long 42000
+    -->
+    <secondsSpentLimit>10</secondsSpentLimit>
+    <!--<bestScoreLimit>-0hard/-999999soft</bestScoreLimit>-->
+  </termination>
+  <constructionHeuristic>
+    <constructionHeuristicType>WEAKEST_FIT</constructionHeuristicType>
+  </constructionHeuristic>
+  <localSearch>
+    <unionMoveSelector>
+      <moveListFactory>
+        <cacheType>PHASE</cacheType>
+        <moveListFactoryClass>com.rotabuilder.dom.solver.move.factory.EmployeeChangeMoveFactory</moveListFactoryClass>
+      </moveListFactory>
+      <moveListFactory>
+        <cacheType>PHASE</cacheType>
+        <moveListFactoryClass>com.rotabuilder.dom.solver.move.factory.ShiftAssignmentSwapMoveFactory</moveListFactoryClass>
+      </moveListFactory>
+      <moveListFactory>
+        <cacheType>STEP</cacheType>
+        <moveListFactoryClass>com.rotabuilder.dom.solver.move.factory.ShiftAssignmentPillarPartSwapMoveFactory</moveListFactoryClass>
+      </moveListFactory>
+      <!--<moveListFactory>-->
+        <!--<cacheType>STEP</cacheType>-->
+        <!--<moveListFactoryClass>domainapp.dom.ShiftAssignmentSequenceSwitchLength2MoveFactory</moveListFactoryClass>-->
+      <!--</moveListFactory>-->
+      <!--<moveListFactory>-->
+        <!--<cacheType>STEP</cacheType>-->
+        <!--<moveListFactoryClass>domainapp.dom.ShiftAssignmentSequenceSwitchLength3MoveFactory</moveListFactoryClass>-->
+      <!--</moveListFactory>-->
+    </unionMoveSelector>
+    <acceptor>
+      <entityTabuSize>7</entityTabuSize>
+    </acceptor>
+    <forager>
+      <acceptedCountLimit>800</acceptedCountLimit>
+    </forager>
+  </localSearch>
+</solver>

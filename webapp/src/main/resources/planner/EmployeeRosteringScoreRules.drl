@@ -1,0 +1,623 @@
+/*
+ * Copyright 2010 Red Hat, Inc. and/or its affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.rotabuilder.dom.solver;
+    dialect "java"
+
+import org.optaplanner.core.api.score.buildin.hardsoft.HardSoftScoreHolder;
+
+import com.rotabuilder.dom.domain.contract.Contract;
+import com.rotabuilder.dom.domain.contract.BooleanContractLine;
+import com.rotabuilder.dom.domain.contract.ContractLine;
+import com.rotabuilder.dom.domain.contract.ContractLineType;
+import com.rotabuilder.dom.domain.contract.MinMaxContractLine;
+import com.rotabuilder.dom.domain.contract.PatternContractLine;
+
+import com.rotabuilder.dom.domain.employee.Employee;
+import com.rotabuilder.dom.domain.employee.Skill;
+import com.rotabuilder.dom.domain.employee.SkillProficiency;
+import com.rotabuilder.dom.domain.employee.DayOffRequest;
+import com.rotabuilder.dom.domain.employee.DayOnRequest;
+import com.rotabuilder.dom.domain.employee.ShiftOffRequest;
+import com.rotabuilder.dom.domain.employee.ShiftOnRequest;
+
+import com.rotabuilder.dom.domain.pattern.DayOfWeek;
+import com.rotabuilder.dom.domain.pattern.WeekendDefinition;
+import com.rotabuilder.dom.domain.pattern.FreeBefore2DaysWithAWorkDayPattern;
+import com.rotabuilder.dom.domain.pattern.Pattern;
+import com.rotabuilder.dom.domain.pattern.ShiftType2DaysPattern;
+import com.rotabuilder.dom.domain.pattern.ShiftType3DaysPattern;
+import com.rotabuilder.dom.domain.pattern.WorkBeforeFreeSequencePattern;
+
+import com.rotabuilder.dom.domain.shift.Shift;
+import com.rotabuilder.dom.domain.shift.ShiftAssignment;
+import com.rotabuilder.dom.domain.shift.ShiftDate;
+import com.rotabuilder.dom.domain.shift.ShiftType;
+import com.rotabuilder.dom.domain.shift.ShiftTypeSkillRequirement;
+
+import com.rotabuilder.dom.domain.solver.EmployeeRoster;
+import com.rotabuilder.dom.domain.solver.EmployeeRosterParametrization;
+
+import com.rotabuilder.dom.solver.drools.EmployeeAssignmentTotal;
+import com.rotabuilder.dom.solver.drools.EmployeeConsecutiveAssignmentEnd;
+import com.rotabuilder.dom.solver.drools.EmployeeConsecutiveAssignmentStart;
+import com.rotabuilder.dom.solver.drools.EmployeeConsecutiveWeekendAssignmentEnd;
+import com.rotabuilder.dom.solver.drools.EmployeeConsecutiveWeekendAssignmentStart;
+import com.rotabuilder.dom.solver.drools.EmployeeFreeSequence;
+import com.rotabuilder.dom.solver.drools.EmployeeWeekendSequence;
+import com.rotabuilder.dom.solver.drools.EmployeeWorkSequence;
+
+global HardSoftScoreHolder scoreHolder;
+
+// ############################################################################
+// Hard constraints
+// ############################################################################
+
+// This rule is build in
+// All demanded shifts must be assigned to a nurse
+//rule "requiredEmployeeSizePerShift"
+//    when
+//        $shift : Shift(requiredEmployeeSize > 0, $requiredEmployeeSize : requiredEmployeeSize)
+//
+//        $totalEmployeeSize : Number(intValue != $requiredEmployeeSize) from accumulate(
+//            $assignment : ShiftAssignment(shift == $shift),
+//            count($assignment)
+//        )
+//    then
+//        scoreHolder.addHardConstraintMatch(kcontext,
+//                - Math.abs($requiredEmployeeSize - $totalEmployeeSize.intValue());
+//end
+
+// a nurse can only work one shift per day, i.e. no two shift can be assigned to the same nurse on a day.
+//rule "oneShiftPerDay"
+//    when
+//        ShiftAssignment($leftId : id, $employee : employee, $shiftDate : shiftDate, employee != null)
+//        ShiftAssignment(employee == $employee, shiftDate == $shiftDate, id > $leftId)
+//    then
+//        scoreHolder.addHardConstraintMatch(kcontext, -1);
+//end
+
+// ############################################################################
+// Soft constraints
+// ############################################################################
+
+rule "insertEmployeeAssignmentTotal"
+        salience 1 // Do these rules first (optional, for performance)
+    when
+        MinMaxContractLine(contractLineType == ContractLineType.TOTAL_ASSIGNMENTS, enabled == true,
+            $contract : contract)
+        $employee : Employee(contract == $contract)
+        $assignmentTotal : Number() from accumulate(
+            $assignment : ShiftAssignment(employee == $employee),
+            count($assignment)
+        )
+    then
+        insertLogical(new EmployeeAssignmentTotal($employee, $assignmentTotal.intValue()));
+end
+
+// Minimum number of assignments
+rule "minimumTotalAssignments"
+    when
+        $contractLine : MinMaxContractLine(
+            contractLineType == ContractLineType.TOTAL_ASSIGNMENTS, minimumEnabled == true,
+            $contract : contract, $minimumValue : minimumValue
+        )
+        EmployeeAssignmentTotal(employeeContract == $contract, total < $minimumValue,
+            $employee : employee, $total : total)
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, ($total - $minimumValue) * $contractLine.getMinimumWeight());
+end
+
+// Maximum number of assignments
+rule "maximumTotalAssignments"
+    when
+        $contractLine : MinMaxContractLine(
+            contractLineType == ContractLineType.TOTAL_ASSIGNMENTS, maximumEnabled == true,
+            $contract : contract, $maximumValue : maximumValue
+        )
+        EmployeeAssignmentTotal(employeeContract == $contract, total > $maximumValue,
+            $employee : employee, $total : total)
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, ($maximumValue - $total) * $contractLine.getMaximumWeight());
+end
+
+
+rule "insertEmployeeConsecutiveAssignmentStart"
+        salience 2 // Do these rules first (optional, for performance)
+    when
+        ShiftAssignment(
+            $employee : employee, employee != null,
+            $dayIndex : shiftDateDayIndex,
+            $shiftDate : shiftDate
+        )
+        // The first day has no working day before it
+        not ShiftAssignment(employee == $employee, shiftDateDayIndex == ($dayIndex - 1))
+    then
+        insertLogical(new EmployeeConsecutiveAssignmentStart($employee, $shiftDate));
+end
+rule "insertEmployeeConsecutiveAssignmentEnd"
+        salience 2 // Do these rules first (optional, for performance)
+    when
+        ShiftAssignment(
+            $employee : employee, employee != null,
+            $dayIndex : shiftDateDayIndex,
+            $shiftDate : shiftDate
+        )
+        // The last day has no working day after it
+        not ShiftAssignment(employee == $employee, shiftDateDayIndex == ($dayIndex + 1))
+    then
+        insertLogical(new EmployeeConsecutiveAssignmentEnd($employee, $shiftDate));
+end
+
+rule "insertEmployeeWorkSequence"
+        salience 1 // Do these rules first (optional, for performance)
+    when
+        EmployeeConsecutiveAssignmentStart(
+            $employee : employee,
+            $firstDayIndex : shiftDateDayIndex
+        )
+
+        EmployeeConsecutiveAssignmentEnd(
+            employee == $employee,
+            shiftDateDayIndex >= $firstDayIndex,
+            $lastDayIndex : shiftDateDayIndex
+        )
+
+        // There are no free days between the first and last day
+        not EmployeeConsecutiveAssignmentEnd(
+            employee == $employee,
+            shiftDateDayIndex >= $firstDayIndex && < $lastDayIndex
+        )
+    then
+        insertLogical(new EmployeeWorkSequence($employee, $firstDayIndex, $lastDayIndex));
+end
+
+// Minimum number of consecutive working days
+rule "minimumConsecutiveWorkingDays"
+    when
+        $contractLine : MinMaxContractLine(
+            contractLineType == ContractLineType.CONSECUTIVE_WORKING_DAYS, minimumEnabled == true,
+            $contract : contract, $minimumValue : minimumValue
+        )
+        $employee : Employee(contract == $contract)
+
+        EmployeeWorkSequence(
+            employee == $employee,
+            dayLength < $minimumValue,
+            $dayLength : dayLength
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, ($dayLength - $minimumValue) * $contractLine.getMinimumWeight());
+end
+
+// Maximum number of consecutive working days
+rule "maximumConsecutiveWorkingDays"
+    when
+        $contractLine : MinMaxContractLine(
+            contractLineType == ContractLineType.CONSECUTIVE_WORKING_DAYS, maximumEnabled == true,
+            $contract : contract, $maximumValue : maximumValue
+        )
+        $employee : Employee(contract == $contract)
+
+        EmployeeWorkSequence(
+            employee == $employee,
+            dayLength > $maximumValue,
+            $dayLength : dayLength
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, ($maximumValue - $dayLength) * $contractLine.getMaximumWeight());
+end
+
+
+rule "insertEmployeeFreeSequence"
+        salience 1 // Do these rules first (optional, for performance)
+    when
+        EmployeeConsecutiveAssignmentEnd(
+            $employee : employee,
+            $firstDayIndexMinusOne : shiftDateDayIndex
+        )
+
+        EmployeeConsecutiveAssignmentStart(
+            employee == $employee,
+            shiftDateDayIndex > $firstDayIndexMinusOne,
+            $lastDayIndexPlusOne : shiftDateDayIndex
+        )
+
+        // There are no working days between the first and last day
+        not EmployeeConsecutiveAssignmentStart(
+            employee == $employee,
+            shiftDateDayIndex > $firstDayIndexMinusOne && < $lastDayIndexPlusOne
+        )
+    then
+        insertLogical(new EmployeeFreeSequence($employee, $firstDayIndexMinusOne + 1, $lastDayIndexPlusOne - 1));
+end
+rule "insertFirstEmployeeFreeSequence"
+        salience 1 // Do these rules first (optional, for performance)
+    when
+        EmployeeConsecutiveAssignmentStart(
+            $employee : employee,
+            $lastDayIndexPlusOne : shiftDateDayIndex
+        )
+
+        // There are no working days before the first day
+        not EmployeeConsecutiveAssignmentEnd(
+            employee == $employee,
+            shiftDateDayIndex < $lastDayIndexPlusOne
+        )
+        EmployeeRosterParametrization(firstShiftDateDayIndex < $lastDayIndexPlusOne, $firstDayIndex : firstShiftDateDayIndex)
+    then
+        insertLogical(new EmployeeFreeSequence($employee, $firstDayIndex, $lastDayIndexPlusOne - 1));
+end
+rule "insertLastEmployeeFreeSequence"
+        salience 1 // Do these rules first (optional, for performance)
+    when
+        EmployeeConsecutiveAssignmentEnd(
+            $employee : employee,
+            $firstDayIndexMinusOne : shiftDateDayIndex
+        )
+
+        // There are no working days after the last day
+        not EmployeeConsecutiveAssignmentStart(
+            employee == $employee,
+            shiftDateDayIndex > $firstDayIndexMinusOne
+        )
+        EmployeeRosterParametrization(lastShiftDateDayIndex > $firstDayIndexMinusOne, $lastDayIndex : lastShiftDateDayIndex)
+    then
+        insertLogical(new EmployeeFreeSequence($employee, $firstDayIndexMinusOne + 1, $lastDayIndex));
+end
+rule "insertEntireEmployeeFreeSequence"
+        salience 1 // Do these rules first (optional, for performance)
+    when
+        $employee : Employee()
+        // There are no working days after the last day
+        not EmployeeConsecutiveAssignmentStart(
+            employee == $employee
+        )
+        EmployeeRosterParametrization($firstDayIndex : firstShiftDateDayIndex, $lastDayIndex : lastShiftDateDayIndex)
+    then
+        insertLogical(new EmployeeFreeSequence($employee, $firstDayIndex, $lastDayIndex));
+end
+
+// Minimum number of consecutive free days
+rule "minimumConsecutiveFreeDays"
+    when
+        $contractLine : MinMaxContractLine(
+            contractLineType == ContractLineType.CONSECUTIVE_FREE_DAYS, minimumEnabled == true,
+            $contract : contract, $minimumValue : minimumValue
+        )
+        $employee : Employee(contract == $contract)
+
+        EmployeeFreeSequence(
+            employee == $employee,
+            dayLength < $minimumValue,
+            $dayLength : dayLength
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, ($dayLength - $minimumValue) * $contractLine.getMinimumWeight());
+end
+
+// Maximum number of consecutive free days
+rule "maximumConsecutiveFreeDays"
+    when
+        $contractLine : MinMaxContractLine(
+            contractLineType == ContractLineType.CONSECUTIVE_FREE_DAYS, maximumEnabled == true,
+            $contract : contract, $maximumValue : maximumValue
+        )
+        $employee : Employee(contract == $contract)
+
+        EmployeeFreeSequence(
+            employee == $employee,
+            dayLength > $maximumValue,
+            $dayLength : dayLength
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, ($maximumValue - $dayLength) * $contractLine.getMaximumWeight());
+end
+
+
+rule "insertEmployeeConsecutiveWeekendAssignmentStart"
+        salience 2 // Do these rules first (optional, for performance)
+    when
+        ShiftAssignment(
+            weekend == true,
+            $employee : employee, employee != null,
+            $weekendSundayIndex : weekendSundayIndex
+        )
+        // The first working weekend has no working weekend before it
+        not ShiftAssignment(
+            weekend == true,
+            employee == $employee,
+            weekendSundayIndex == ($weekendSundayIndex - 7)
+        )
+    then
+        insertLogical(new EmployeeConsecutiveWeekendAssignmentStart($employee, $weekendSundayIndex));
+end
+rule "insertEmployeeConsecutiveWeekendAssignmentEnd"
+        salience 2 // Do these rules first (optional, for performance)
+    when
+        ShiftAssignment(
+            weekend == true,
+            $employee : employee, employee != null,
+            $weekendSundayIndex : weekendSundayIndex
+        )
+        // The last working weekend has no working weekend after it
+        not ShiftAssignment(
+            weekend == true,
+            employee == $employee,
+            weekendSundayIndex == ($weekendSundayIndex + 7)
+        )
+    then
+        insertLogical(new EmployeeConsecutiveWeekendAssignmentEnd($employee, $weekendSundayIndex));
+end
+
+rule "insertEmployeeWeekendSequence"
+    when
+        EmployeeConsecutiveWeekendAssignmentStart(
+            $employee : employee,
+            $firstSundayIndex : sundayIndex
+        )
+
+        EmployeeConsecutiveWeekendAssignmentEnd(
+            employee == $employee,
+            sundayIndex >= $firstSundayIndex,
+            $lastSundayIndex : sundayIndex
+        )
+
+        // There are no free weekends between the first and last weekend
+        not EmployeeConsecutiveWeekendAssignmentEnd(
+            employee == $employee,
+            sundayIndex >= $firstSundayIndex && < $lastSundayIndex
+        )
+    then
+        insertLogical(new EmployeeWeekendSequence($employee, $firstSundayIndex, $lastSundayIndex));
+end
+
+// Minimum number of consecutive working weekends
+rule "minimumConsecutiveWorkingWeekends"
+    when
+        $contractLine : MinMaxContractLine(
+            contractLineType == ContractLineType.CONSECUTIVE_WORKING_WEEKENDS, minimumEnabled == true,
+            $contract : contract, $minimumValue : minimumValue
+        )
+        $employee : Employee(contract == $contract)
+
+        EmployeeWeekendSequence(
+            employee == $employee,
+            weekendLength < $minimumValue,
+            $weekendLength : weekendLength
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext,
+                ($weekendLength - $minimumValue) * $contractLine.getMinimumWeight());
+end
+
+// Maximum number of consecutive working weekends
+rule "maximumConsecutiveWorkingWeekends"
+    when
+        $contractLine : MinMaxContractLine(
+            contractLineType == ContractLineType.CONSECUTIVE_WORKING_WEEKENDS, maximumEnabled == true,
+            $contract : contract, $maximumValue : maximumValue
+        )
+        $employee : Employee(contract == $contract)
+
+        EmployeeWeekendSequence(
+            employee == $employee,
+            weekendLength > $maximumValue,
+            $weekendLength : weekendLength
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext,
+                ($maximumValue - $weekendLength) * $contractLine.getMaximumWeight());
+end
+
+
+// Complete weekends
+rule "startOnNotFirstDayOfWeekend"
+    when
+        $contractLine : BooleanContractLine(
+            contractLineType == ContractLineType.COMPLETE_WEEKENDS, enabled == true,
+            $contract : contract
+        )
+        EmployeeConsecutiveAssignmentStart(
+            weekendAndNotFirstDayOfWeekend == true,
+            contract == $contract,
+            $distanceToFirstDayOfWeekend : distanceToFirstDayOfWeekend
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $distanceToFirstDayOfWeekend * $contractLine.getWeight());
+end
+rule "endOnNotLastDayOfWeekend"
+    when
+        $contractLine : BooleanContractLine(
+            contractLineType == ContractLineType.COMPLETE_WEEKENDS, enabled == true,
+            $contract : contract
+        )
+        EmployeeConsecutiveAssignmentEnd(
+            weekendAndNotLastDayOfWeekend == true,
+            contract == $contract,
+            $distanceToLastDayOfWeekend : distanceToLastDayOfWeekend
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $distanceToLastDayOfWeekend * $contractLine.getWeight());
+end
+
+// Identical shiftTypes during a weekend
+rule "identicalShiftTypesDuringWeekend"
+    when
+        $contractLine : BooleanContractLine(contractLineType == ContractLineType.IDENTICAL_SHIFT_TYPES_DURING_WEEKEND,
+            enabled == true, $contract : contract)
+        $employee : Employee(contract == $contract, $weekendLength : weekendLength)
+        ShiftDate(dayOfWeek == DayOfWeek.SUNDAY, $sundayIndex : dayIndex)
+        $shiftType : ShiftType()
+        $weekendAssignmentTotal : Number(intValue > 0 && < $weekendLength) from accumulate(
+            $assignment : ShiftAssignment(
+                weekend == true,
+                weekendSundayIndex == $sundayIndex,
+                employee == $employee,
+                shiftType == $shiftType),
+            count($assignment)
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext,
+                ($weekendAssignmentTotal.intValue() - $weekendLength) * $contractLine.getWeight());
+end
+
+// Requested day on/off
+rule "dayOffRequest"
+    when
+        DayOffRequest($employee : employee, $shiftDate : shiftDate, $weight : weight)
+        ShiftAssignment(employee == $employee, shiftDate == $shiftDate)
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $weight);
+end
+rule "dayOnRequest"
+    when
+        DayOnRequest($employee : employee, $shiftDate : shiftDate, $weight : weight)
+        not ShiftAssignment(employee == $employee, shiftDate == $shiftDate)
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $weight);
+end
+
+// Requested shift on/off
+rule "shiftOffRequest"
+    when
+        ShiftOffRequest($employee : employee, $shift : shift, $weight : weight)
+        ShiftAssignment(employee == $employee, shift == $shift)
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $weight);
+end
+rule "shiftOnRequest"
+    when
+        ShiftOnRequest($employee : employee, $shift : shift, $weight : weight)
+        not ShiftAssignment(employee == $employee, shift == $shift)
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $weight);
+end
+
+// Alternative skill
+rule "alternativeSkill"
+    when
+        $contractLine : BooleanContractLine(contractLineType == ContractLineType.ALTERNATIVE_SKILL_CATEGORY,
+            $contract : contract)
+        ShiftAssignment(contract == $contract, $employee : employee, $shiftType : shiftType)
+        ShiftTypeSkillRequirement(shiftType == $shiftType, $skill : skill)
+        not SkillProficiency(employee == $employee, skill == $skill)
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $contractLine.getWeight());
+end
+
+// Unwanted patterns
+rule "unwantedPatternFreeBefore2DaysWithAWorkDayPattern"
+    when
+        $pattern : FreeBefore2DaysWithAWorkDayPattern(
+            $freeDayOfWeek : freeDayOfWeek
+        )
+        PatternContractLine(
+            pattern == $pattern, $contract : contract
+        )
+        ShiftDate(dayOfWeek == $freeDayOfWeek, $freeDayIndex : dayIndex)
+        $employee : Employee(contract == $contract)
+
+        not ShiftAssignment(
+            employee == $employee,
+            shiftDateDayIndex == $freeDayIndex
+        )
+        exists ShiftAssignment(
+            employee == $employee,
+            shiftDateDayIndex == ($freeDayIndex + 1) || shiftDateDayIndex == ($freeDayIndex + 2)
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $pattern.getWeight());
+end
+
+// TODO support WorkBeforeFreeSequencePattern too (not needed for competition)
+//rule "unwantedPatternWorkBeforeFreeSequencePattern"
+//    when
+//        $pattern : WorkBeforeFreeSequencePattern(
+//            $workDayOfWeek : workDayOfWeek,
+//            $workShiftType : workShiftType,
+//            $freeDayLength : freeDayLength
+//        )
+//        PatternContractLine(
+//            pattern == $pattern, $contract : contract
+//        )
+//
+//        ShiftAssignment(
+//            ($workDayOfWeek == null) || (shiftDateDayOfWeek == $workDayOfWeek),
+//            ($workShiftType == null) || (shiftType == $workShiftType),
+//            contract == $contract,
+//            $employee : employee, $workDayIndex : shiftDateDayIndex
+//        )
+//        EmployeeFreeSequence(
+//            employee == $employee,
+//            firstDayIndex == ($workDayIndex + 1),
+//            dayLength >= $freeDayLength
+//        )
+//    then
+//        scoreHolder.addSoftConstraintMatch(kcontext, - $pattern.getWeight());
+//end
+rule "unwantedPatternShiftType2DaysPattern"
+    when
+        $pattern : ShiftType2DaysPattern(
+            $dayIndex0ShiftType : dayIndex0ShiftType,
+            $dayIndex1ShiftType : dayIndex1ShiftType
+        )
+        PatternContractLine(
+            pattern == $pattern, $contract : contract
+        )
+
+        ShiftAssignment(
+            shiftType == $dayIndex0ShiftType,
+            contract == $contract,
+            $employee : employee, $firstDayIndex : shiftDateDayIndex
+        )
+        ShiftAssignment(
+            ($dayIndex1ShiftType == null) || (shiftType == $dayIndex1ShiftType),
+            employee == $employee,
+            shiftDateDayIndex == ($firstDayIndex + 1)
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $pattern.getWeight());
+end
+rule "unwantedPatternShiftType3DaysPattern"
+    when
+        $pattern : ShiftType3DaysPattern(
+            $dayIndex0ShiftType : dayIndex0ShiftType,
+            $dayIndex1ShiftType : dayIndex1ShiftType,
+            $dayIndex2ShiftType : dayIndex2ShiftType
+        )
+        PatternContractLine(
+            pattern == $pattern, $contract : contract
+        )
+
+        ShiftAssignment(
+            shiftType == $dayIndex0ShiftType,
+            contract == $contract,
+            $employee : employee, $firstDayIndex : shiftDateDayIndex
+        )
+        ShiftAssignment(
+            shiftType == $dayIndex1ShiftType,
+            employee == $employee,
+            shiftDateDayIndex == ($firstDayIndex + 1)
+        )
+        ShiftAssignment(
+            shiftType == $dayIndex2ShiftType,
+            employee == $employee,
+            shiftDateDayIndex == ($firstDayIndex + 2)
+        )
+    then
+        scoreHolder.addSoftConstraintMatch(kcontext, - $pattern.getWeight());
+end
