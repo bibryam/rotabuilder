@@ -36,9 +36,8 @@ See live demo running at [http://rotabuilder.com](http://rotabuilder.com)
 
 ### Screenshot
 
-![project view](![project view](![project view](https://2.bp.blogspot.com/-jb-IJWAOtbY/WjUIQ1tRCII/AAAAAAAAJ5Y/83vQxgATqJwC_gh2xsNgEyjAGsYuz9aMgCLcBGAs/s1600/Screen%2BShot%2B2017-12-16%2Bat%2B11.47.33.png)
-)
-)
+![project view](https://2.bp.blogspot.com/-jb-IJWAOtbY/WjUIQ1tRCII/AAAAAAAAJ5Y/83vQxgATqJwC_gh2xsNgEyjAGsYuz9aMgCLcBGAs/s1600/Screen%2BShot%2B2017-12-16%2Bat%2B11.47.33.png)
+
 
 ### Application Features
  - Manage employees
