@@ -1,5 +1,5 @@
 ### RotaBuilder - Employee Rostering
-*A Java web application for nurse scheduling based on [OptaPlanner](http://optaplanner.org/) and [Apache ISIS](http://isis.apache.org/)*
+*A Java web application for nurse scheduling based on [OptaPlanner](http://optaplanner.org/) and [Apache Isis](http://isis.apache.org/)*
 
 ### (option 1) Local: Build and Run with Maven
 
